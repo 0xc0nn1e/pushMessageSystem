@@ -1,7 +1,17 @@
-import http from "node:http";
+import Fastify from "fastify";
+
+const app = Fastify({ logger: true });
 const port = Number(process.env.PORT ?? 3000);
-const server = http.createServer((req, res) => {
-  if (req.url === "/health") { res.writeHead(200, {"content-type":"application/json"}); res.end(JSON.stringify({ok:true})); return; }
-  res.writeHead(404, {"content-type":"application/json"}); res.end(JSON.stringify({ok:false}));
+
+app.get("/health", async () => {
+  return { ok: true };
 });
-server.listen(port, "127.0.0.1", () => console.log(`listening on http://127.0.0.1:${port}`));
+
+app.listen({ port, host: "127.0.0.1" })
+  .then(() => {
+    app.log.info(`listening on http://127.0.0.1:${port}`);
+  })
+  .catch(err => {
+    app.log.error(err);
+    process.exit(1);
+  });
