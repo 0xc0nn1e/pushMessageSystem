@@ -1,12 +1,19 @@
 import Fastify from "fastify";
-import "dotenv/config";
+import dotenv from "dotenv";
+dotenv.config();
 import crypto from "node:crypto";
 import { LRUCache } from "lru-cache";
+import { pushTelegram } from "./providers/telegram";
+import { pushLine } from "./providers/line";
+
 
 
 const app = Fastify({ logger: true });
 const port = Number(process.env.PORT ?? 3000);
 const nonceCache = new LRUCache<string, true>({ max: 5000, ttl: Number(process.env.TIME_SKEW_SEC ?? 120) * 1000 });
+
+console.log("SERVER TG len =", (process.env.TG_BOT_TOKEN ?? "").length);
+
 
 app.addContentTypeParser("application/json", { parseAs: "string" }, (req, body, done) => {
   (req as any).rawBody = body;
@@ -49,7 +56,26 @@ app.post("/push", async (req, reply) => {
   const body = req.body as { msg?: string };
   const msg = body?.msg;
   if (typeof msg !== "string" || msg.length === 0) return reply.code(400).send({ ok: false, error: "missing_msg" });
-  return { ok: true };
+
+  const TIMEOUT_MS = 5000;
+
+const [tg, line] = await Promise.allSettled([
+  pushTelegram(msg, TIMEOUT_MS),
+  pushLine(msg, TIMEOUT_MS),
+]);
+
+const tgResult =
+  tg.status === "fulfilled" ? tg.value : { ok: false, error: "tg_crash" as const };
+
+const lineResult =
+  line.status === "fulfilled" ? line.value : { ok: false, error: "line_crash" as const };
+
+return {
+  ok: tgResult.ok || lineResult.ok,
+  tg: tgResult,
+  line: lineResult,
+};
+
 });
 
 
