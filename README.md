@@ -43,7 +43,7 @@ API
 
 ### Base URL
 ```
-$PUSH_URL
+$PUSH_URL   # e.g. https://your-domain.example
 ```
 
 
@@ -122,7 +122,7 @@ console.log({ ts, nonce, sig });
 ### Example Request
 ```
 
-curl -X POST $PUSH_URL/push \
+curl -X POST "$PUSH_URL/push" \
   -H "Content-Type: application/json" \
   -H "X-Timestamp: 1765696399" \
   -H "X-Nonce: 1b08ae1f5308fa4e412bd5f8" \
@@ -139,6 +139,7 @@ curl -X POST $PUSH_URL/push \
 [ -z "$SSH_CONNECTION" ] && return
 [ -z "$SSH_TTY" ] && return
 API_SECRET="API_SECRET"
+PUSH_URL="${PUSH_URL:-https://your-domain.example}"
 IP="$(echo "$SSH_CONNECTION" | awk '{print $1}')"
 HOSTNAME="$(hostname)"
 USER="$(whoami)"
@@ -150,7 +151,7 @@ MSG_ESCAPED="$(printf '%s' "$MSG" | sed 's/\\/\\\\/g;s/"/\\"/g')"
 RAWBODY="$(printf '{"msg":"%s"}' "$MSG_ESCAPED")"
 PAYLOAD="$(printf '%s.%s.%s' "$TS" "$NONCE" "$RAWBODY")"
 SIG="$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$API_SECRET" -binary | base64 -w 0)"
-curl -s -X POST $PUSH_URL/push -H 'content-type: application/json' -H "X-Timestamp: $TS" -H "X-Nonce: $NONCE" -H "X-Signature: $SIG" --data-binary "$RAWBODY" >/dev/null 2>&1 || true
+curl -s -X POST "$PUSH_URL/push" -H 'content-type: application/json' -H "X-Timestamp: $TS" -H "X-Nonce: $NONCE" -H "X-Signature: $SIG" --data-binary "$RAWBODY" >/dev/null 2>&1 || true
 
 ```
 
@@ -193,6 +194,9 @@ TG_CHAT_ID=xxxxx
 # LINE
 LINE_CHANNEL_ACCESS_TOKEN=xxxxx
 LINE_TARGET_ID=xxxxx
+
+# Client (used by the request examples, not the server)
+PUSH_URL=https://your-domain.example
 
 ```
 
