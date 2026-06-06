@@ -41,13 +41,15 @@ app.post("/push", async (req, reply) => {
     if (!Number.isFinite(tsNum)) return reply.code(401).send({ ok: false, error: ERR.BAD_TIMESTAMP });
     const now = Math.floor(Date.now() / 1000);
     const skew = Number(process.env.TIME_SKEW_SEC ?? 120);
-    if (Math.abs(now - tsNum) > skew) return reply.code(401).send({ ok: false, error: ERR.REQUEST_TIMEOUT });
-    if (nonceCache.has(nonce)) return reply.code(401).send({ ok: false, error: ERR.REPLAY_DETECTED });
-    nonceCache.set(nonce, true);
+    if (Math.abs(now - tsNum) > skew) return reply.code(401).send({ ok: false, error: ERR.TIMESTAMP_OUT_OF_WINDOW });
     const rawBody = (req as any).rawBody as string | undefined;
     if (!rawBody) return reply.code(400).send({ ok: false, error: ERR.MISSING_MSG });
     const expected = sign(secret, `${ts}.${nonce}.${rawBody}`);
     if (!timingSafeEqualB64(expected, sig)) return reply.code(401).send({ ok: false, error: ERR.INVALID_SIGNATURE });
+    // Record the nonce only after the signature is verified, so unsigned
+    // requests can't fill the replay cache with attacker-chosen nonces.
+    if (nonceCache.has(nonce)) return reply.code(401).send({ ok: false, error: ERR.REPLAY_DETECTED });
+    nonceCache.set(nonce, true);
     const body = req.body as { msg?: string };
     const msg = body?.msg;
     if (typeof msg !== "string" || msg.length === 0) return reply.code(400).send({ ok: false, error: ERR.MISSING_MSG });

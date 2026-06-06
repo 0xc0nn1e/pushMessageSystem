@@ -1,6 +1,6 @@
 export async function pushLine(msg: string, timeoutMs: number) {
   const token = process.env.LINE_CHANNEL_ACCESS_TOKEN;
-  const to = process.env.LINE_TO;
+  const to = process.env.LINE_TARGET_ID;
   if (!token || !to) {
     return { ok: false, error: "line_not_configured" as const };
   }
