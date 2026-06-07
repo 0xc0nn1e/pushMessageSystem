@@ -5,6 +5,10 @@ Push Message System
 A lightweight, signed HTTP push service that forwards messages to Telegram and LINE.
 Designed for server-side alerts, cron jobs, trading bots, and internal systems.
 
+## screenshot
+
+<img src="https://flight.connie.hk/static/img/pushup_tg.jpg" height="500"><img src="https://flight.connie.hk/static/img/pushup_line.jpg" height="500">
+<br/>Both TG and Line
 
 
 ### Overview
@@ -262,11 +266,9 @@ sudo systemctl restart push-message-system
 ## Security Notes
 - All requests must be signed
 
-- imestamp + nonce prevents replay attacks
+- Timestamp + nonce prevents replay attacks
 
 - Node service not exposed directly to internet
-
-- Only reverse proxy (Caddy) listens on port 80
 
 ### License
 Private / Internal Use
