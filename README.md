@@ -1,274 +1,219 @@
-Push Message System
----
+# Push Message System
 
-
-A lightweight, signed HTTP push service that forwards messages to Telegram and LINE.
-Designed for server-side alerts, cron jobs, trading bots, and internal systems.
-
-## screenshot
+A signed HTTP push service written in Python and hosted on Cloudflare Workers.
+It forwards text messages to Telegram and the LINE Messaging API.
 
 <img src="https://flight.connie.hk/static/img/pushup_tg.jpg" height="500"><img src="https://flight.connie.hk/static/img/pushup_line.jpg" height="500">
-<br/>Both TG and Line
 
+## Architecture
 
-### Overview
-
-- Tech stack: Node.js + Fastify + TypeScript
-- Auth: HMAC-SHA256 signed requests
-- Transport: HTTPS (behind Caddy + Cloudflare)
-- Supports:
-  - Telegram Bot API
-  - LINE Notify / Messaging API
-- Replay protection with timestamp + nonce
-- Production-ready (systemd, reverse proxy)
-
-Architecture
- ---
-
-```
-Client
-↓ (signed request)
-Cloudflare
-↓
-Caddy (reverse proxy, port 80)
-↓
-Node.js service (port 3000, internal only)
+```text
+Client -- HTTPS + HMAC-SHA256 --> Python Worker
+                                  |-- Durable Object: reserve nonce atomically
+                                  |-- Telegram Bot API
+                                  `-- LINE Messaging API
 ```
 
+The application runs in Cloudflare's Python runtime. There is no application
+server to start, listening port to expose, or systemd/reverse-proxy service to
+manage. Node.js is still needed locally by Cloudflare's Wrangler tooling.
 
-### Server
+Each verified request reserves its nonce in a SQLite-backed Durable Object
+before sending. All Worker instances share the same object, so concurrent
+requests cannot reuse a nonce. Records survive Worker restarts and are kept
+for at least `TIME_SKEW_SEC`, and until the signed timestamp's entire acceptance
+window ends. Expired records are removed on the next verified request.
+Only nonce hashes and expiry times are stored, never messages or credentials.
+This is replay protection, not a message queue or delivery retry mechanism.
 
-- Listens on `0.0.0.0:3000`
-- **Not exposed directly to the internet**
-- Only accessible via reverse proxy
+## Local development
 
-API
----
-
-### Base URL
-```
-$PUSH_URL   # e.g. https://your-domain.example
-```
-
-
-## Health Check
-### GET `/health`
-
-### Used for:
-1. uptime monitoring
-2. load balancer / reverse proxy checks
-
-### Response
+Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and a
+Node.js version supported by Wrangler. uv manages the project's Python 3.12
+environment; Cloudflare selects its Python runtime from the compatibility date.
 
 ```bash
-{
-  "ok": true
-}
+uv sync --locked
+cp .dev.vars.example .dev.vars
 ```
 
-## Push Message API
+Set a local `SIGN_SECRET` in `.dev.vars`. Leave provider credentials blank
+when checking authentication without sending messages. Then start the Worker:
 
-### POST `/push`
-
-### Used for:
-1. Send a message to **Telegram** and **LINE**.
-
-
-### Headers (Required)
-
-| Header        | Description                          |
-|---------------|--------------------------------------|
-| `Content-Type`  | application/json                     |
-| `X-Timestamp`   | Unix timestamp (seconds)             |
-| `X-Nonce `      | Random unique string                 |
-| `X-Signature`   | HMAC-SHA256 signature (Base64)       |
-
----
-### Request Body 
-```
-{
-  "msg": "Your message text"
-}
-```
-1. msg must be a non-empty string
-2. UTF-8 supported
-3. Newlines allowed (\n)
-
----
-### Signature Generation
+```bash
+uv run pywrangler dev
 ```
 
+The local endpoint is `http://127.0.0.1:8787`. Wrangler emulates Durable Objects
+locally and persists their data under `.wrangler/`. No Cloudflare login is
+needed for these local checks. The first run downloads runtime dependencies.
+
+```bash
+curl http://127.0.0.1:8787/health
+uv run python -m unittest discover -s tests -v
+uv run pywrangler deploy --dry-run
+```
+
+The test suite uses mocked outbound requests and SQLite fixtures. It never
+sends Telegram or LINE messages. The dry run bundles the Worker without
+deploying it.
+
+## Configuration
+
+Non-secret defaults are in `wrangler.toml`. Local secrets belong in the ignored
+`.dev.vars` file. Production credentials use Worker secrets.
+
+| Name | Default / purpose |
+| --- | --- |
+| `SIGN_SECRET` | Required shared HMAC secret |
+| `TIME_SKEW_SEC` | `120`; positive integer clock window, in seconds |
+| `SNS_TIMEOUT_MS` | `5000`; positive integer timeout per provider, in milliseconds |
+| `TG_BOT_TOKEN` | Telegram bot token |
+| `TG_CHAT_ID` | Telegram chat/channel ID |
+| `LINE_CHANNEL_ACCESS_TOKEN` | LINE Messaging API access token |
+| `LINE_TARGET_ID` | LINE user/group ID |
+| `NONCES` | Durable Object binding configured in Wrangler |
+
+Each provider requires both of its configuration values. An unconfigured
+provider reports `tg_not_configured` or `line_not_configured` without making
+a network request. `PUSH_URL` is a client setting only; `PORT` is no longer used.
+Do not commit secrets, local runtime state, or generated dependency folders.
+
+## API
+
+### GET /health
+
+Returns HTTP 200 with `{"ok": true}`. It requires no signature and does not
+check provider credentials or storage. `HEAD /health` returns an empty body.
+
+### POST /push
+
+Send `Content-Type: application/json` and a UTF-8 JSON body, up to 1 MiB:
+
+```json
+{"msg": "Your message text"}
+```
+
+`msg` must be a non-empty string. Unicode and newlines are supported.
+
+| Header | Value |
+| --- | --- |
+| `X-Timestamp` | Unix timestamp in seconds |
+| `X-Nonce` | Fresh random string for each request |
+| `X-Signature` | Base64-encoded HMAC-SHA256 signature |
+
+Calculate the signature with `SIGN_SECRET` over the UTF-8 bytes of:
+
+```text
 {timestamp}.{nonce}.{raw_body}
-
-```
-### HMAC:
-1. Algorithm: HMAC-SHA256
-2. Key: SIGN_SECRET
-3. Output: Base64
-
-### Example (Node.js)
-```
-require("dotenv").config();
-const crypto = require("crypto");
-
-const ts = Math.floor(Date.now() / 1000).toString();
-const nonce = crypto.randomBytes(12).toString("hex");
-const body = JSON.stringify({ msg: "test message" });
-
-const sig = crypto
-  .createHmac("sha256", process.env.SIGN_SECRET)
-  .update(`${ts}.${nonce}.${body}`)
-  .digest("base64");
-
-console.log({ ts, nonce, sig });
-```
----
-### Example Request
 ```
 
-curl -X POST "$PUSH_URL/push" \
-  -H "Content-Type: application/json" \
-  -H "X-Timestamp: 1765696399" \
-  -H "X-Nonce: 1b08ae1f5308fa4e412bd5f8" \
-  -H "X-Signature: e4fOx+I5ow/v9olLrRw8PapzZjpkzupOHY5GgRIVPMk=" \
-  -d '{"msg":"Hello from push-message-system"}'
+The raw body must match the bytes sent, including whitespace. Do not sign
+parsed/reformatted JSON. The protocol is unchanged from the Node.js service,
+so existing correctly signed clients continue to work.
 
-```
+Providers run concurrently. The response remains HTTP 200 after dispatch,
+including when both providers fail:
 
----
-### Shell Example Request
-```
-
-#!/bin/bash
-[ -z "$SSH_CONNECTION" ] && return
-[ -z "$SSH_TTY" ] && return
-API_SECRET="API_SECRET"
-PUSH_URL="${PUSH_URL:-https://your-domain.example}"
-IP="$(echo "$SSH_CONNECTION" | awk '{print $1}')"
-HOSTNAME="$(hostname)"
-USER="$(whoami)"
-NOW="$(date '+%Y-%m-%d %H:%M:%S')"
-MSG="[Login][$HOSTNAME] user=$USER ip=$IP time=$NOW"
-TS="$(date +%s)"
-NONCE="$(head /dev/urandom | tr -dc A-Za-z0-9 | head -c 16)"
-MSG_ESCAPED="$(printf '%s' "$MSG" | sed 's/\\/\\\\/g;s/"/\\"/g')"
-RAWBODY="$(printf '{"msg":"%s"}' "$MSG_ESCAPED")"
-PAYLOAD="$(printf '%s.%s.%s' "$TS" "$NONCE" "$RAWBODY")"
-SIG="$(printf '%s' "$PAYLOAD" | openssl dgst -sha256 -hmac "$API_SECRET" -binary | base64 -w 0)"
-curl -s -X POST "$PUSH_URL/push" -H 'content-type: application/json' -H "X-Timestamp: $TS" -H "X-Nonce: $NONCE" -H "X-Signature: $SIG" --data-binary "$RAWBODY" >/dev/null 2>&1 || true
-
-```
-
-### Success Response
-```
-
+```json
 {
   "ok": true,
-  "tg": { "ok": true },
-  "line": { "ok": true }
+  "tg": {"ok": true},
+  "line": {"ok": false, "error": "line_timeout"}
 }
-
 ```
 
-### Error Responses
+Top-level `ok` is true if either provider succeeds. A failed provider does not
+cancel the other one. Errors include `*_not_configured`, `*_http_<status>`,
+`*_timeout`, `*_network`, and `*_crash`, with `tg` or `line` prefixes.
+A nonce remains consumed even if the message is invalid or delivery fails.
 
-| HTTP | error                     | Meaning                       |
-|------|---------------------------|-------------------------------|
-| 400  | `missing_msg`             | Request body missing `msg`    |
-| 401  | `missing_signature_headers` | Signature headers missing     |
-| 401  | `bad_timestamp`           | Invalid timestamp             |
-| 401  | `timestamp_out_of_window` | Timestamp expired             |
-| 401  | `replay_detected`         | Nonce already used            |
-| 401  | `invalid_signature`       | Signature mismatch            |
-| 500  | `server_misconfig`        | Missing env config            |
+### Send from Python
 
-## Environment Variables
-```
-
-PORT=3000
-
-# Signature
-SIGN_SECRET=your_shared_secret
-TIME_SKEW_SEC=120
-
-# Telegram
-TG_BOT_TOKEN=xxxxx
-TG_CHAT_ID=xxxxx
-
-# LINE
-LINE_CHANNEL_ACCESS_TOKEN=xxxxx
-LINE_TARGET_ID=xxxxx
-
-# Client (used by the request examples, not the server)
-PUSH_URL=https://your-domain.example
-
-```
-
-## Development
+`scripts/send.py` uses only the Python standard library. Set `PUSH_URL` and
+`SIGN_SECRET` in your shell or secret manager, then run:
 
 ```bash
-pnpm install
-pnpm dev
+export PUSH_URL=http://127.0.0.1:8787
+# Set SIGN_SECRET to match the server without placing it in shell history.
+uv run python scripts/send.py "Hello from Python"
 ```
 
-Runs with:
-- hot reload (tsx)
-- listens on 0.0.0.0:3000
+The script generates a fresh timestamp and nonce, signs the exact body,
+sends it, and prints the JSON response. This command sends real messages
+if the target Worker has provider credentials configured.
 
-## Production
+### Errors
+
+Application errors use `{"ok": false, "error": "<code>"}`.
+
+| HTTP | Error | Meaning |
+| --- | --- | --- |
+| 400 | `missing_msg` | Missing, empty, or non-string message |
+| 400 | `invalid_json` | Invalid JSON or UTF-8 |
+| 401 | `missing_signature_headers` | A required signature header is missing |
+| 401 | `bad_timestamp` | Timestamp is not a finite number |
+| 401 | `timestamp_out_of_window` | Timestamp is outside the accepted window |
+| 401 | `invalid_signature` | Signature does not match the raw body |
+| 401 | `replay_detected` | Nonce has already been reserved |
+| 404 | `not_found` | Unknown route or unsupported method |
+| 413 | `payload_too_large` | Request body exceeds 1 MiB |
+| 415 | `unsupported_media_type` | Content type is not application/json |
+| 500 | `server_misconfig` | Missing signing secret or invalid numeric configuration |
+| 503 | `replay_unavailable` | Nonce storage failed; no messages were sent |
+
+Input/routing errors now use this JSON envelope instead of Fastify-generated
+parser messages. Existing authentication and provider error codes are retained.
+
+## Deploy to Cloudflare
+
+Review the Worker name and compatibility date in `wrangler.toml`, then:
 
 ```bash
-pnpm install --frozen-lockfile
-pnpm build
-pnpm start
+uv run pywrangler login
+uv run pywrangler deploy
+uv run pywrangler secret put SIGN_SECRET
+uv run pywrangler secret put TG_BOT_TOKEN
+uv run pywrangler secret put TG_CHAT_ID
+uv run pywrangler secret put LINE_CHANNEL_ACCESS_TOKEN
+uv run pywrangler secret put LINE_TARGET_ID
 ```
 
-Recommended:
-- behind Caddy / Nginx
-- Cloudflare in front
+The first deployment creates the Worker and its SQLite Durable Object via
+migration `v1`. Push requests fail closed until `SIGN_SECRET` is configured.
+Configure at least one provider before directing clients to the Worker.
+Enter secret values at the prompts; skip both secrets for unused providers.
 
-## Production systemd setting
+Use the HTTPS `workers.dev` URL printed by Wrangler, or configure a Worker
+custom domain, as the client `PUSH_URL`. Custom domains are not preconfigured
+in this repository. Further releases use `uv run pywrangler deploy`.
 
-```bash
+Keep the `NONCES` binding, `NonceStore` class, migration history, and
+`push-nonces-v1` object name stable so releases retain replay state.
+Do not replace this storage with an isolate-local dictionary or an eventually
+consistent cache.
 
-sudo /etc/systemd/system/push-message-system.service
+### Migrating from the Node.js service
 
-[Unit]
-Description=push-message-system
-After=network-online.target
-Wants=network-online.target
+1. Retain the existing shared signing secret and provider configuration.
+2. Configure and validate the Worker before changing client URLs.
+3. The old in-memory nonce cache cannot be transferred. To preserve replay
+   protection across cutover, stop old ingress and let the full timestamp
+   window drain before admitting requests to the Worker
+   (`2 * TIME_SKEW_SEC + 1` seconds covers future-dated requests).
+4. Update `PUSH_URL` and stop the old Node.js service after cutover.
 
-[Service]
-Type=simple
-User=user
-WorkingDirectory=/home/user/apps/push-message-system
-Environment=NODE_ENV=production
-ExecStart=/home/user/.nvm/versions/node/v24.12.0/bin/node dist/index.js
-Restart=always
-RestartSec=2
+The pnpm/TypeScript build and systemd deployment are replaced by
+`pyproject.toml`, `uv.lock`, the runtime `pylock.toml` generated by pywrangler,
+and `wrangler.toml`. No changes to the old production host are performed by
+this repository's local development commands.
 
-[Install]
-WantedBy=multi-user.target
+## References
 
-```
+- [Cloudflare Python Workers](https://developers.cloudflare.com/workers/languages/python/)
+- [SQLite Durable Object storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/)
+- [Worker secrets](https://developers.cloudflare.com/workers/configuration/secrets/)
 
-## Production update
+## License
 
-```bash
-
-git pull
-pnpm install --frozen-lockfile
-pnpm build
-sudo systemctl restart push-message-system
-
-```
-
-## Security Notes
-- All requests must be signed
-
-- Timestamp + nonce prevents replay attacks
-
-- Node service not exposed directly to internet
-
-### License
-Private / Internal Use
+Private / Internal Use.

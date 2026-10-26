@@ -1,0 +1,13 @@
+# Copy to .dev.vars for local development. Never commit real secrets.
+# Production: uv run pywrangler secret put <NAME>
+SIGN_SECRET=
+
+# Leave providers blank for local checks that must not send messages.
+TG_BOT_TOKEN=
+TG_CHAT_ID=
+LINE_CHANNEL_ACCESS_TOKEN=
+LINE_TARGET_ID=
+
+# Non-secret defaults are defined in wrangler.toml:
+# TIME_SKEW_SEC=120
+# SNS_TIMEOUT_MS=5000

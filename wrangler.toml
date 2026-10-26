@@ -1,0 +1,20 @@
+name = "push-message-system"
+main = "src/entry.py"
+compatibility_date = "2026-10-26"
+compatibility_flags = ["python_workers"]
+
+[vars]
+TIME_SKEW_SEC = "120"
+SNS_TIMEOUT_MS = "5000"
+
+[[durable_objects.bindings]]
+name = "NONCES"
+class_name = "NonceStore"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["NonceStore"]
+
+[dev]
+ip = "127.0.0.1"
+port = 8787
